@@ -1,91 +1,69 @@
-import aiohttp
-import asyncio
-from datetime import datetime, timedelta
-from typing import Dict, Set, Optional
-import redis
-import logging
+import time
+import random
+from urllib.parse import urlparse
+from collections import defaultdict
 
-class DistributedCrawler:
-    def __init__(self, redis_url: str, max_requests_per_second: int = 10):
-        self.redis_client = redis.from_url(redis_url)
-        self.session: Optional[aiohttp.ClientSession] = None
-        self.rate_limit = max_requests_per_second
-        self.request_times: Dict[str, datetime] = {}
-        self.seen_urls: Set[str] = set()
-        self.logger = logging.getLogger(__name__)
+class RateLimitedCrawler:
+    def __init__(self):
+        self.domain_timestamps = defaultdict(list)
+        self.min_delay = 1.0  # Minimum delay between requests to same domain
+        self.max_delay = 30.0 # Maximum backoff delay
+        self.backoff_factor = 2.0
 
-    async def __aenter__(self):
-        self.session = aiohttp.ClientSession()
-        return self
+    def get_domain(self, url):
+        """Extract domain from URL"""
+        return urlparse(url).netloc
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
-            await self.session.close()
+    def calculate_delay(self, domain):
+        """Calculate adaptive delay based on recent request history"""
+        recent_requests = self.domain_timestamps[domain]
+        # Clean old timestamps
+        current_time = time.time()
+        recent_requests = [t for t in recent_requests if current_time - t < 60]
+        self.domain_timestamps[domain] = recent_requests
 
-    async def _check_rate_limit(self, domain: str) -> None:
-        """Ensure we don't exceed rate limits for a domain"""
-        now = datetime.now()
-        if domain in self.request_times:
-            time_diff = now - self.request_times[domain]
-            if time_diff.total_seconds() < (1.0 / self.rate_limit):
-                await asyncio.sleep(1.0 / self.rate_limit - time_diff.total_seconds())
-        self.request_times[domain] = now
+        if not recent_requests:
+            return self.min_delay
 
-    async def fetch_page(self, url: str) -> Optional[str]:
-        """Fetch a page with rate limiting and caching"""
-        if url in self.seen_urls:
-            self.logger.debug(f"Skipping already seen URL: {url}")
-            return None
+        # Calculate request rate
+        request_rate = len(recent_requests) / 60.0
+        
+        if request_rate > 10:  # More than 10 requests per minute
+            delay = min(self.max_delay, self.min_delay * (self.backoff_factor ** (request_rate - 10)))
+        else:
+            delay = self.min_delay
 
-        # Check cache first
-        cached_content = self.redis_client.get(f"page:{url}")
-        if cached_content:
-            self.logger.debug(f"Cache hit for URL: {url}")
-            return cached_content.decode('utf-8')
+        # Add random jitter
+        delay *= (1 + random.uniform(-0.1, 0.1))
+        return delay
 
-        # Extract domain for rate limiting
-        domain = url.split('/')[2]
-        await self._check_rate_limit(domain)
+    async def crawl(self, url):
+        """Crawl URL with intelligent rate limiting"""
+        domain = self.get_domain(url)
+        delay = self.calculate_delay(domain)
+        
+        # Wait for calculated delay
+        await asyncio.sleep(delay)
 
         try:
-            async with self.session.get(url) as response:
-                if response.status == 200:
-                    content = await response.text()
-                    # Cache the result with 1 hour expiration
-                    self.redis_client.setex(
-                        f"page:{url}",
-                        timedelta(hours=1),
-                        content.encode('utf-8')
-                    )
-                    self.seen_urls.add(url)
-                    return content
-                else:
-                    self.logger.warning(f"Failed to fetch {url}: {response.status}")
-                    return None
+            # Record timestamp of request
+            self.domain_timestamps[domain].append(time.time())
+
+            # Perform actual request here
+            # TODO: Implement actual crawling logic
+            pass
+
         except Exception as e:
-            self.logger.error(f"Error fetching {url}: {str(e)}")
-            return None
+            # Increase backoff on errors
+            self.min_delay = min(self.max_delay, self.min_delay * self.backoff_factor)
+            raise
 
-    async def crawl_urls(self, urls: list[str]) -> Dict[str, Optional[str]]:
-        """Crawl multiple URLs concurrently"""
-        tasks = [self.fetch_page(url) for url in urls]
-        results = await asyncio.gather(*tasks)
-        return dict(zip(urls, results))
+    def reset_backoff(self, domain):
+        """Reset backoff settings for domain"""
+        self.domain_timestamps[domain].clear()
+        self.min_delay = 1.0
 
-# Usage example:
-'''
-async def main():
-    async with DistributedCrawler("redis://localhost:6379/0") as crawler:
-        urls = [
-            "https://example.com",
-            "https://example.org",
-            "https://example.net"
-        ]
-        results = await crawler.crawl_urls(urls)
-        for url, content in results.items():
-            if content:
-                print(f"Successfully crawled {url}")
-
-if __name__ == "__main__":
-    asyncio.run(main())
-'''
+    async def bulk_crawl(self, urls):
+        """Crawl multiple URLs with rate limiting"""
+        tasks = [self.crawl(url) for url in urls]
+        return await asyncio.gather(*tasks, return_exceptions=True)
