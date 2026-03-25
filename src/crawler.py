@@ -1,88 +1,77 @@
 import time
 import random
-from urllib.parse import urlparse
 from collections import defaultdict
+from datetime import datetime, timedelta
 
 class DistributedCrawler:
     def __init__(self):
-        # Per-domain rate limiting
-        self.domain_last_access = defaultdict(float)
-        self.min_delay = 1.0  # Minimum seconds between requests to same domain
-        self.jitter = 0.5     # Random jitter to prevent synchronization
+        # Track requests per domain
+        self.domain_requests = defaultdict(list)
+        # Default politeness settings
+        self.min_delay = 1.0  # seconds between requests
+        self.max_requests_per_domain = 60  # per minute
+        self.respect_robots_txt = True
         
-        # Politeness settings
-        self.respect_robots = True
-        self.user_agent = 'Hive-Crawler/1.0'
-        self.robots_cache = {}
-        
-        # Crawl state
-        self.visited_urls = set()
-        self.queue = []
-    
-    def add_url(self, url):
-        """Add URL to crawl queue with domain-based rate limiting"""
-        if url not in self.visited_urls:
-            self.queue.append(url)
-            self.visited_urls.add(url)
+    def get_domain_from_url(self, url):
+        """Extract domain from URL"""
+        # Basic domain extraction - could be enhanced
+        return url.split('/')[2]
     
     def can_crawl_url(self, url):
-        """Check if URL can be crawled according to rate limits and robots.txt"""
-        domain = urlparse(url).netloc
+        """Check if we can crawl URL based on politeness policies"""
+        domain = self.get_domain_from_url(url)
+        now = datetime.now()
         
-        # Check domain rate limiting
-        now = time.time()
-        last_access = self.domain_last_access[domain]
-        time_passed = now - last_access
+        # Clean old requests
+        self.domain_requests[domain] = [
+            req_time for req_time in self.domain_requests[domain]
+            if now - req_time < timedelta(minutes=1)
+        ]
         
-        if time_passed < self.min_delay:
+        # Check request count
+        if len(self.domain_requests[domain]) >= self.max_requests_per_domain:
             return False
             
-        # Add random jitter to prevent synchronization
-        jitter_delay = random.uniform(0, self.jitter)
-        time.sleep(jitter_delay)
-        
-        # Update last access time
-        self.domain_last_access[domain] = now + jitter_delay
-        
+        # Check delay since last request
+        if self.domain_requests[domain]:
+            last_req = max(self.domain_requests[domain])
+            if (now - last_req).total_seconds() < self.min_delay:
+                return False
+                
         return True
     
-    async def crawl(self):
-        """Main crawl loop with politeness controls"""
-        while self.queue:
-            url = self.queue.pop(0)
+    def crawl_url(self, url):
+        """Crawl a URL with politeness policies"""
+        if not self.can_crawl_url(url):
+            return None
             
-            if not self.can_crawl_url(url):
-                # Re-queue for later if rate limited
-                self.queue.append(url)
-                continue
-                
-            try:
-                # Fetch and process URL
-                content = await self.fetch_url(url)
-                self.process_content(url, content)
-                
-                # Extract and queue new URLs
-                new_urls = self.extract_urls(content)
-                for new_url in new_urls:
-                    self.add_url(new_url)
-                    
-            except Exception as e:
-                print(f'Error crawling {url}: {e}')
+        domain = self.get_domain_from_url(url)
+        
+        try:
+            # Record request time
+            self.domain_requests[domain].append(datetime.now())
+            
+            # Add jitter to delays
+            jitter = random.uniform(0, 0.5)
+            time.sleep(self.min_delay + jitter)
+            
+            # TODO: Actual crawling logic here
+            # This is where you'd make the HTTP request
+            # and process the response
+            
+            return {'url': url, 'status': 'success'}
+            
+        except Exception as e:
+            return {'url': url, 'status': 'error', 'error': str(e)}
     
-    async def fetch_url(self, url):
-        """Fetch URL content with proper headers"""
-        # Implementation of actual HTTP fetch goes here
-        pass
-        
-    def process_content(self, url, content):
-        """Process crawled content"""
-        # Implementation of content processing goes here
-        pass
-        
-    def extract_urls(self, content):
-        """Extract new URLs from content"""
-        # Implementation of URL extraction goes here
-        return []
-
+    def set_politeness_policy(self, min_delay=None, max_requests=None, respect_robots=None):
+        """Configure crawler politeness settings"""
+        if min_delay is not None:
+            self.min_delay = float(min_delay)
+        if max_requests is not None:
+            self.max_requests_per_domain = int(max_requests)
+        if respect_robots is not None:
+            self.respect_robots_txt = bool(respect_robots)
+            
     def __str__(self):
-        return f'DistributedCrawler(queue={len(self.queue)}, visited={len(self.visited_urls)})
+        return f'DistributedCrawler(delay={self.min_delay}s, max_requests={self.max_requests_per_domain}/min)'
