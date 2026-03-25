@@ -1,77 +1,81 @@
 import time
 import random
+from urllib.parse import urlparse
 from collections import defaultdict
-from datetime import datetime, timedelta
 
-class DistributedCrawler:
+class RateLimitedCrawler:
     def __init__(self):
-        # Track requests per domain
-        self.domain_requests = defaultdict(list)
-        # Default politeness settings
-        self.min_delay = 1.0  # seconds between requests
-        self.max_requests_per_domain = 60  # per minute
-        self.respect_robots_txt = True
+        # Per-domain request tracking
+        self.domain_last_request = defaultdict(float)
+        self.domain_backoff = defaultdict(lambda: 1.0)
         
-    def get_domain_from_url(self, url):
+        # Base crawl settings
+        self.min_delay = 1.0  # Minimum seconds between requests
+        self.max_backoff = 60.0  # Maximum backoff in seconds
+        self.backoff_factor = 2.0  # Multiplicative factor for backoff
+
+    def get_domain(self, url):
         """Extract domain from URL"""
-        # Basic domain extraction - could be enhanced
-        return url.split('/')[2]
-    
-    def can_crawl_url(self, url):
-        """Check if we can crawl URL based on politeness policies"""
-        domain = self.get_domain_from_url(url)
-        now = datetime.now()
+        return urlparse(url).netloc
+
+    def wait_for_rate_limit(self, url):
+        """Intelligent rate limiting with exponential backoff"""
+        domain = self.get_domain(url)
+        current_time = time.time()
         
-        # Clean old requests
-        self.domain_requests[domain] = [
-            req_time for req_time in self.domain_requests[domain]
-            if now - req_time < timedelta(minutes=1)
-        ]
+        # Calculate wait time needed
+        elapsed = current_time - self.domain_last_request[domain]
+        required_delay = max(self.min_delay * self.domain_backoff[domain], self.min_delay)
         
-        # Check request count
-        if len(self.domain_requests[domain]) >= self.max_requests_per_domain:
-            return False
-            
-        # Check delay since last request
-        if self.domain_requests[domain]:
-            last_req = max(self.domain_requests[domain])
-            if (now - last_req).total_seconds() < self.min_delay:
-                return False
-                
-        return True
-    
-    def crawl_url(self, url):
-        """Crawl a URL with politeness policies"""
-        if not self.can_crawl_url(url):
-            return None
-            
-        domain = self.get_domain_from_url(url)
+        if elapsed < required_delay:
+            sleep_time = required_delay - elapsed
+            time.sleep(sleep_time + random.uniform(0, 1))
+
+    def crawl(self, url):
+        """Main crawling method with rate limiting"""
+        domain = self.get_domain(url)
         
         try:
-            # Record request time
-            self.domain_requests[domain].append(datetime.now())
+            self.wait_for_rate_limit(url)
             
-            # Add jitter to delays
-            jitter = random.uniform(0, 0.5)
-            time.sleep(self.min_delay + jitter)
+            # Simulated request - replace with actual crawling logic
+            success = self._make_request(url)
             
-            # TODO: Actual crawling logic here
-            # This is where you'd make the HTTP request
-            # and process the response
+            if success:
+                # Reduce backoff on success
+                self.domain_backoff[domain] = max(
+                    1.0,
+                    self.domain_backoff[domain] / self.backoff_factor
+                )
+            else:
+                # Increase backoff on failure
+                self.domain_backoff[domain] = min(
+                    self.max_backoff,
+                    self.domain_backoff[domain] * self.backoff_factor
+                )
             
-            return {'url': url, 'status': 'success'}
+            self.domain_last_request[domain] = time.time()
+            return success
             
         except Exception as e:
-            return {'url': url, 'status': 'error', 'error': str(e)}
-    
-    def set_politeness_policy(self, min_delay=None, max_requests=None, respect_robots=None):
-        """Configure crawler politeness settings"""
-        if min_delay is not None:
-            self.min_delay = float(min_delay)
-        if max_requests is not None:
-            self.max_requests_per_domain = int(max_requests)
-        if respect_robots is not None:
-            self.respect_robots_txt = bool(respect_robots)
-            
-    def __str__(self):
-        return f'DistributedCrawler(delay={self.min_delay}s, max_requests={self.max_requests_per_domain}/min)'
+            # Increase backoff on errors
+            self.domain_backoff[domain] = min(
+                self.max_backoff,
+                self.domain_backoff[domain] * self.backoff_factor
+            )
+            raise e
+
+    def _make_request(self, url):
+        """Placeholder for actual request logic"""
+        # TODO: Implement actual HTTP request handling
+        return True
+
+    def get_domain_stats(self):
+        """Return current domain statistics"""
+        stats = {}
+        for domain in self.domain_last_request:
+            stats[domain] = {
+                'last_request': self.domain_last_request[domain],
+                'current_backoff': self.domain_backoff[domain]
+            }
+        return stats
